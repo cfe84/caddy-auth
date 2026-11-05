@@ -1,16 +1,17 @@
 package authsvc
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestBrowserSignInSSOCodeExchangeAndTrustedBoundary(t *testing.T) {
@@ -244,11 +245,49 @@ func TestLoginRejectsUnregisteredAndAmbiguousCallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, callback := range []string{"https://evil.example/_caddy_auth/callback", "https://app.example.com/%5f_caddy_auth/callback", "https://app.example.com@evil.example/_caddy_auth/callback", "https://app.example.com/_caddy_auth/callback?next=https://evil.example"} {
-		request := loginRequest{Callback: callback, Site: "https://app.example.com", State: "state", Challenge: "challenge", Role: "accounting", TTL: int64(time.Hour.Seconds())}
-		if valid, err := service.validCallback(request); err != nil || valid {
-			t.Errorf("accepted callback %q", callback)
-		}
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+	state, err := randomToken(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, key, value, reason string
+	}{
+		{"foreign callback", "callback", "https://evil.example/_caddy_auth/callback", "invalid_callback"},
+		{"encoded callback", "callback", "https://app.example.com/%5f_caddy_auth/callback", "invalid_callback"},
+		{"callback userinfo", "callback", "https://app.example.com@evil.example/_caddy_auth/callback", "invalid_callback"},
+		{"callback query", "callback", "https://app.example.com/_caddy_auth/callback?next=private-value", "invalid_callback"},
+		{"invalid origin", "site", "http://app.example.com", "invalid_origin"},
+		{"invalid state", "state", "private-value", "invalid_state"},
+		{"invalid challenge", "challenge", "private-value", "invalid_pkce"},
+		{"invalid ttl", "ttl", "0", "invalid_ttl"},
+		{"missing parameter", "role", "", "malformed_parameters"},
+		{"unregistered site", "site", "https://unregistered.example.com", "unregistered_site"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			query := url.Values{"callback": {"https://app.example.com/_caddy_auth/callback"}, "site": {"https://app.example.com"}, "state": {state}, "challenge": {state}, "role": {"accounting"}, "ttl": {"3600"}}
+			query.Set(test.key, test.value)
+			if test.reason == "unregistered_site" {
+				query.Set("callback", test.value+"/_caddy_auth/callback")
+			}
+			logs.Reset()
+			response := httptest.NewRecorder()
+			service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/login?"+query.Encode(), nil))
+			if response.Code != http.StatusBadRequest || response.Body.String() != "invalid login request\n" {
+				t.Fatalf("rejection response = %d %q", response.Code, response.Body.String())
+			}
+			if !strings.HasSuffix(logs.String(), "WARN invalid login attempt: reason="+test.reason+"\n") {
+				t.Fatalf("rejection diagnostic = %q", logs.String())
+			}
+			for _, value := range []string{"private-value", state, "https://", "accounting"} {
+				if strings.Contains(logs.String(), value) {
+					t.Fatalf("rejection diagnostic contains request data: %q", logs.String())
+				}
+			}
+		})
 	}
 }
 

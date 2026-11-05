@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -86,15 +87,17 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	request, err := parseLogin(r)
 	if err != nil {
+		log.Printf("WARN invalid login attempt: reason=malformed_parameters")
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
 	}
-	valid, err := s.validCallback(request)
+	reason, err := s.callbackRejectionReason(request)
 	if err != nil {
 		http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if !valid {
+	if reason != "" {
+		log.Printf("WARN invalid login attempt: reason=%s", reason)
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
 	}
@@ -215,19 +218,34 @@ func queryOne(values url.Values, key string) (string, error) {
 	return items[0], nil
 }
 
-func (s *Server) validCallback(request loginRequest) (bool, error) {
+func (s *Server) callbackRejectionReason(request loginRequest) (string, error) {
 	canonical, err := canonicalOrigin(request.Site)
-	if err != nil || canonical != request.Site || request.Callback != request.Site+"/_caddy_auth/callback" {
-		return false, nil
+	if err != nil || canonical != request.Site {
+		return "invalid_origin", nil
 	}
-	if !validPKCEValue(request.State) || !validPKCEValue(request.Challenge) || request.Role == "" || request.TTL <= 0 || request.TTL > int64((24*time.Hour).Seconds()) {
-		return false, nil
+	if request.Callback != request.Site+"/_caddy_auth/callback" {
+		return "invalid_callback", nil
+	}
+	if !validPKCEValue(request.State) {
+		return "invalid_state", nil
+	}
+	if !validPKCEValue(request.Challenge) {
+		return "invalid_pkce", nil
+	}
+	if request.Role == "" {
+		return "missing_role", nil
+	}
+	if request.TTL <= 0 || request.TTL > int64((24*time.Hour).Seconds()) {
+		return "invalid_ttl", nil
 	}
 	var registered int
 	if err := s.Store.db.QueryRow("SELECT count(*) FROM sites WHERE origin=?", request.Site).Scan(&registered); err != nil {
-		return false, err
+		return "", err
 	}
-	return registered == 1, nil
+	if registered != 1 {
+		return "unregistered_site", nil
+	}
+	return "", nil
 }
 
 func validPKCEValue(value string) bool {
