@@ -1,0 +1,27 @@
+{
+	auth {
+		service {$AUTH_SERVICE}
+		instance_token {$AUTH_INSTANCE_TOKEN}
+	}
+}
+
+app.example.com {
+	require_auth {
+		role accounting
+		ttl 1h
+	}
+	reverse_proxy accounting:8080
+}
+
+reports.example.com {
+	@private path /reports/*
+	require_auth @private {
+		role accounting
+		ttl 15m
+	}
+	reverse_proxy reports:8080
+}
+
+auth.example.com {
+	reverse_proxy 127.0.0.1:8090
+}
