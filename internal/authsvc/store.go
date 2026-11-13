@@ -181,7 +181,7 @@ func (s *Store) RemoveMembership(name, role string) error {
 }
 
 func (s *Store) RegisterSite(origin string) error {
-	canonical, err := canonicalOrigin(origin)
+	canonical, err := canonicalSiteOrigin(origin)
 	if err != nil {
 		return err
 	}
@@ -191,6 +191,39 @@ func (s *Store) RegisterSite(origin string) error {
 func (s *Store) registerCanonicalSite(canonical string) error {
 	_, err := s.db.Exec("INSERT INTO sites(origin) VALUES(?) ON CONFLICT DO NOTHING", canonical)
 	return err
+}
+
+func canonicalSiteOrigin(origin string) (string, error) {
+	if !strings.HasPrefix(origin, "https://*.") {
+		return canonicalOrigin(origin)
+	}
+	canonical, err := canonicalOrigin("https://" + strings.TrimPrefix(origin, "https://*."))
+	if err != nil {
+		return "", err
+	}
+	u, _ := url.Parse(canonical)
+	if net.ParseIP(u.Hostname()) != nil {
+		return "", errors.New("wildcard sites require a DNS name")
+	}
+	return "https://*." + strings.TrimPrefix(canonical, "https://"), nil
+}
+
+func (s *Store) siteAllowed(origin string) (bool, error) {
+	canonical, err := canonicalOrigin(origin)
+	if err != nil || canonical != origin {
+		return false, nil
+	}
+	u, _ := url.Parse(canonical)
+	pattern := ""
+	if net.ParseIP(u.Hostname()) == nil {
+		label, _, hasParent := strings.Cut(u.Hostname(), ".")
+		if hasParent {
+			pattern = "https://*." + strings.TrimPrefix(u.Host, label+".")
+		}
+	}
+	var count int
+	err = s.db.QueryRow("SELECT count(*) FROM sites WHERE origin IN (?,?)", canonical, pattern).Scan(&count)
+	return count > 0, err
 }
 
 func canonicalOrigin(origin string) (string, error) {
@@ -224,7 +257,7 @@ func canonicalOrigin(origin string) (string, error) {
 			port = ""
 		}
 	}
-	if net.ParseIP(host) != nil {
+	if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
 	if port != "" {
@@ -309,18 +342,18 @@ WHERE c.id=? AND c.enabled=1 AND cr.role=?`, credentialID, role).Scan(&found)
 }
 
 func (s *Store) IssueCode(session, origin, callback, state, role, challenge string) (string, error) {
+	registered, err := s.siteAllowed(origin)
+	if err != nil {
+		return "", err
+	}
+	if !registered {
+		return "", errors.New("unregistered site origin")
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback()
-	var registered int
-	if err := tx.QueryRow("SELECT count(*) FROM sites WHERE origin=?", origin).Scan(&registered); err != nil {
-		return "", err
-	}
-	if registered != 1 {
-		return "", errors.New("unregistered site origin")
-	}
 	if len(callback) > 2048 || state == "" || role == "" || challenge == "" {
 		return "", errors.New("invalid login request")
 	}

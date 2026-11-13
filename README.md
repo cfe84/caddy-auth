@@ -44,7 +44,15 @@ xcaddy build --with github.com/cfe84/caddy-auth@<tag-or-commit>
    ./authctl site add https://app.example.com
    ```
 
-   Repeat `site add` for each exact HTTPS host/port. Wildcards, paths, query strings, userinfo, and non-HTTPS origins are rejected. Site registration is an explicit bootstrap action; the service never trusts a browser-supplied `Host` to add a callback. The authenticated `/api/sites` endpoint is available for a trusted deployment controller, but this build does not infer site addresses from Caddy's opaque JSON server routes or synchronize them automatically.
+   Register exact HTTPS origins or a leading wildcard, quoted to avoid shell expansion:
+
+   ```sh
+   ./authctl site add 'https://*.home.cingen.net'
+   ```
+
+   A wildcard matches exactly one subdomain: `accounting.home.cingen.net` matches, but `home.cingen.net` and `deep.accounting.home.cingen.net` do not. Ports must match exactly; an omitted port is equivalent to HTTPS port 443. Every matching subdomain is trusted as a callback destination, so only register patterns whose subdomains you control. Other wildcard forms, paths, query strings, userinfo, and non-HTTPS origins are rejected. Codes and grants remain bound to the concrete origin, not the wildcard.
+
+   Site registration is an explicit bootstrap action; the service never trusts a browser-supplied `Host` to add a callback. The authenticated `/api/sites` endpoint accepts the same exact origins and wildcard patterns for a trusted deployment controller, but this build does not infer site addresses from Caddy's opaque JSON server routes or synchronize them automatically.
 
 4. Configure Caddy (see [`examples/Caddyfile`](examples/Caddyfile)):
 

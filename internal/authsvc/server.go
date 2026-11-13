@@ -1,6 +1,7 @@
 package authsvc
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
@@ -146,7 +147,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "__Host-auth_csrf", Value: csrf, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 600})
 	encoded, _ := json.Marshal(request)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title></head><body><form method="post" action="/login"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="request" value="%s"><label>Username <input name="username" autocomplete="username" required></label><label>Password <input type="password" name="password" autocomplete="current-password" required></label><button type="submit">Sign in</button></form></body></html>`, html.EscapeString(csrf), html.EscapeString(string(encoded)))
+	styleHash := sha256.Sum256([]byte(loginStyles))
+	w.Header().Set("Content-Security-Policy", w.Header().Get("Content-Security-Policy")+"; style-src 'sha256-"+base64.StdEncoding.EncodeToString(styleHash[:])+"'")
+	fmt.Fprintf(w, loginPage, loginStyles, html.EscapeString(csrf), html.EscapeString(string(encoded)))
 }
 
 func clientIP(r *http.Request) string {
@@ -238,11 +241,11 @@ func (s *Server) callbackRejectionReason(request loginRequest) (string, error) {
 	if request.TTL <= 0 || request.TTL > int64((24*time.Hour).Seconds()) {
 		return "invalid_ttl", nil
 	}
-	var registered int
-	if err := s.Store.db.QueryRow("SELECT count(*) FROM sites WHERE origin=?", request.Site).Scan(&registered); err != nil {
+	registered, err := s.Store.siteAllowed(request.Site)
+	if err != nil {
 		return "", err
 	}
-	if registered != 1 {
+	if !registered {
 		return "unregistered_site", nil
 	}
 	return "", nil
@@ -385,7 +388,7 @@ func (s *Server) registerSite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	canonical, err := canonicalOrigin(body.Origin)
+	canonical, err := canonicalSiteOrigin(body.Origin)
 	if err != nil {
 		http.Error(w, "invalid origin", http.StatusBadRequest)
 		return

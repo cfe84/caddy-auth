@@ -123,9 +123,37 @@ func TestGrantPKCEExpiryRevocationAndPasswordChange(t *testing.T) {
 
 func TestRegisterSiteRejectsAmbiguousOrigins(t *testing.T) {
 	store, _ := testStore(t)
-	for _, origin := range []string{"http://app.example.com", "https://*.example.com", "https://app.example.com@evil.test", "https://app.example.com/%2f/evil", "https://app.example.com?next=evil"} {
+	for _, origin := range []string{"http://app.example.com", "https://app*.example.com", "https://*.*.example.com", "https://*.127.0.0.1", "https://app.example.com@evil.test", "https://app.example.com/%2f/evil", "https://app.example.com?next=evil"} {
 		if err := store.RegisterSite(origin); err == nil {
 			t.Errorf("accepted origin %q", origin)
 		}
+	}
+	for _, pattern := range []string{"https://*.HOME.example.com:443/", "https://*.internal.example.com:8443"} {
+		if err := store.RegisterSite(pattern); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		origin  string
+		allowed bool
+	}{
+		{"https://app.example.com", true},
+		{"https://accounting.home.example.com", true},
+		{"https://other.home.example.com", true},
+		{"https://home.example.com", false},
+		{"https://deep.accounting.home.example.com", false},
+		{"https://accounting.home.example.com.evil.test", false},
+		{"https://accounting.otherhome.example.com", false},
+		{"https://accounting.home.example.com:8443", false},
+		{"https://accounting.internal.example.com:8443", true},
+		{"https://accounting.internal.example.com", false},
+		{"https://*.home.example.com", false},
+	} {
+		t.Run(test.origin, func(t *testing.T) {
+			allowed, err := store.siteAllowed(test.origin)
+			if err != nil || allowed != test.allowed {
+				t.Fatalf("site allowed = %t, %v; want %t", allowed, err, test.allowed)
+			}
+		})
 	}
 }

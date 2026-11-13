@@ -16,6 +16,12 @@ import (
 
 func TestBrowserSignInSSOCodeExchangeAndTrustedBoundary(t *testing.T) {
 	store, _ := testStore(t)
+	if _, err := store.db.Exec("DELETE FROM sites"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RegisterSite("https://*.example.com"); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.AddRole("unassigned"); err != nil {
 		t.Fatal(err)
 	}
@@ -43,8 +49,16 @@ func TestBrowserSignInSSOCodeExchangeAndTrustedBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || !strings.Contains(readBody(t, response), "autocomplete=\"current-password\"") {
+	page := readBody(t, response)
+	if response.StatusCode != http.StatusOK || !strings.Contains(page, "autocomplete=\"current-password\"") {
 		t.Fatalf("sign-in page status %d", response.StatusCode)
+	}
+	_, afterStyle, hasStyle := strings.Cut(page, "<style>")
+	styles, _, hasEndStyle := strings.Cut(afterStyle, "</style>")
+	styleDigest := sha256.Sum256([]byte(styles))
+	stylePolicy := "style-src 'sha256-" + base64.StdEncoding.EncodeToString(styleDigest[:]) + "'"
+	if !hasStyle || !hasEndStyle || !strings.Contains(page, "name=\"viewport\"") || !strings.Contains(styles, ":focus-visible") || !strings.Contains(response.Header.Get("Content-Security-Policy"), stylePolicy) {
+		t.Fatal("responsive login styling is missing or blocked by its content security policy")
 	}
 	var csrf string
 	for _, cookie := range response.Cookies() {
@@ -157,11 +171,16 @@ func TestBrowserSignInSSOCodeExchangeAndTrustedBoundary(t *testing.T) {
 		t.Fatalf("untrusted health API status %d", unauthorized.StatusCode)
 	}
 	unauthorized.Body.Close()
-	badSite := api("/api/sites", map[string]string{"origin": "https://*.example.com"}, true)
+	badSite := api("/api/sites", map[string]string{"origin": "https://app*.example.com"}, true)
 	if badSite.StatusCode != http.StatusBadRequest {
-		t.Fatalf("wildcard origin registration status %d", badSite.StatusCode)
+		t.Fatalf("ambiguous wildcard registration status %d", badSite.StatusCode)
 	}
 	badSite.Body.Close()
+	registeredSite := api("/api/sites", map[string]string{"origin": "https://*.home.example.com"}, true)
+	if registeredSite.StatusCode != http.StatusNoContent {
+		t.Fatalf("wildcard registration status %d", registeredSite.StatusCode)
+	}
+	registeredSite.Body.Close()
 
 	exchange := map[string]any{"code": silentCode, "verifier": verifier, "callback": login.Callback, "site": login.Site, "state": login.State, "role": login.Role, "ttl_seconds": login.TTL}
 	response = api("/api/exchange", exchange, true)
@@ -175,6 +194,15 @@ func TestBrowserSignInSSOCodeExchangeAndTrustedBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
+	response = api("/api/validate", map[string]any{"token": issued.Token, "site": "https://other.example.com", "role": login.Role, "ttl_seconds": 3600}, true)
+	var otherSite Validation
+	if err := json.NewDecoder(response.Body).Decode(&otherSite); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if otherSite.Outcome != "forbidden" {
+		t.Fatalf("wildcard registration allowed a grant on another origin: %+v", otherSite)
+	}
 	response = api("/api/exchange", exchange, true)
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("replayed code status %d", response.StatusCode)
